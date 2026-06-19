@@ -163,3 +163,60 @@ jobs:
           cat app.txt
           echo "----- release manifest -----"
           cat .ops/release-manifest.json
+
+      - name: Create promotion PR to main
+        uses: actions/github-script@v7
+        env:
+          BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
+          PLAN_JSON: ${{ steps.plan.outputs.plan }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const branchName = process.env.BRANCH_NAME;
+            const plan = JSON.parse(process.env.PLAN_JSON || "[]");
+
+            if (plan.length === 0) {
+              core.info("No promotion PR needed");
+              return;
+            }
+
+            const issueNumbers = [...new Set(plan.map(item => item.issue_number))];
+            const prNumbers = plan.map(item => item.pr_number);
+
+            const title = `[PROMOTE] ${branchName} -> main`;
+            const body = [
+              "## Promotion Summary",
+              "",
+              `- Branch: \`${branchName}\``,
+              `- Issue(s): ${issueNumbers.map(n => `#${n}`).join(", ")}`,
+              `- Develop PR(s): ${prNumbers.map(n => `#${n}`).join(", ")}`,
+              ""
+            ].join("\n");
+
+            const existing = await github.paginate(
+              github.rest.pulls.list,
+              {
+                owner,
+                repo,
+                state: "open",
+                base: "main",
+                head: `${owner}:${branchName}`,
+                per_page: 100
+              }
+            );
+
+            if (existing.length > 0) {
+              core.info(`Promotion PR already exists: #${existing[0].number}`);
+              return;
+            }
+
+            const created = await github.rest.pulls.create({
+              owner,
+              repo,
+              title,
+              head: branchName,
+              base: "main",
+              body
+            });
+
+            core.info(`Created promotion PR #${created.data.number}`);
