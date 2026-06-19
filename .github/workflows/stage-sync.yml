@@ -1,0 +1,37 @@
+name: Stage Sync
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: read
+
+jobs:
+  find-ready-issues:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: List ready-for-stage issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                owner,
+                repo,
+                state: "open",
+                labels: "ready-for-stage",
+                per_page: 100
+              }
+            );
+
+            core.info(`ready-for-stage issue count: ${issues.length}`);
+
+            for (const issue of issues) {
+              core.info(`#${issue.number} ${issue.title}`);
+            }
