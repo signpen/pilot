@@ -88,7 +88,13 @@ jobs:
               }
             }
 
-            const today = new Date().toISOString().slice(0, 10);
+            const today = new Intl.DateTimeFormat("sv-SE", {
+              timeZone: "Asia/Seoul",
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit"
+            }).format(new Date());
+            
             core.setOutput("branch_name", `promote/${today}`);
             core.setOutput("plan", JSON.stringify(plan));
 
