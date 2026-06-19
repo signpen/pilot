@@ -13,11 +13,29 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: List ready-for-release issues
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch all branches
+        run: |
+          git fetch origin +refs/heads/*:refs/remotes/origin/*
+
+      - name: Check ready-for-release issues and staged PRs
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require("fs");
             const { owner, repo } = context.repo;
+
+            const stageManifestText = require("child_process")
+              .execSync("git show origin/stage:.ops/stage-manifest.json", { encoding: "utf8" });
+            const stageManifest = JSON.parse(stageManifestText);
+            const stagedPrs = stageManifest.staged_prs || [];
+
+            core.info(`staged PRs: ${JSON.stringify(stagedPrs)}`);
 
             const issues = await github.paginate(
               github.rest.issues.listForRepo,
@@ -32,6 +50,36 @@ jobs:
 
             core.info(`ready-for-release issue count: ${issues.length}`);
 
+            const prs = await github.paginate(
+              github.rest.pulls.list,
+              {
+                owner,
+                repo,
+                state: "closed",
+                base: "develop",
+                per_page: 100
+              }
+            );
+
             for (const issue of issues) {
               core.info(`ISSUE #${issue.number} ${issue.title}`);
+
+              const merged = prs.filter(pr =>
+                pr.merged_at &&
+                pr.title.includes(`[#${issue.number}]`)
+              );
+
+              core.info(`matched merged PR count for issue #${issue.number}: ${merged.length}`);
+
+              for (const pr of merged) {
+                const isStaged = stagedPrs.includes(pr.number);
+                core.info(`PR #${pr.number} ${pr.title} / staged: ${isStaged}`);
+              }
+
+              const releasable = merged.filter(pr => stagedPrs.includes(pr.number));
+              core.info(`releasable PR count for issue #${issue.number}: ${releasable.length}`);
+
+              for (const pr of releasable) {
+                core.info(`RELEASABLE PR #${pr.number} ${pr.title}`);
+              }
             }
