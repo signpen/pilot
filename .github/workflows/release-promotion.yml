@@ -23,18 +23,22 @@ jobs:
         run: |
           git fetch origin +refs/heads/*:refs/remotes/origin/*
 
-      - name: Check ready-for-release issues and staged PRs
+      - name: Check ready-for-release issues and released PRs
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require("fs");
             const { owner, repo } = context.repo;
 
+            const releaseManifest = JSON.parse(fs.readFileSync(".ops/release-manifest.json", "utf8"));
+            const releasedPrs = releaseManifest.released_prs || [];
+
             const stageManifestText = require("child_process")
               .execSync("git show origin/stage:.ops/stage-manifest.json", { encoding: "utf8" });
             const stageManifest = JSON.parse(stageManifestText);
             const stagedPrs = stageManifest.staged_prs || [];
 
+            core.info(`released PRs: ${JSON.stringify(releasedPrs)}`);
             core.info(`staged PRs: ${JSON.stringify(stagedPrs)}`);
 
             const issues = await github.paginate(
@@ -69,17 +73,18 @@ jobs:
                 pr.title.includes(`[#${issue.number}]`)
               );
 
-              core.info(`matched merged PR count for issue #${issue.number}: ${merged.length}`);
-
-              for (const pr of merged) {
-                const isStaged = stagedPrs.includes(pr.number);
-                core.info(`PR #${pr.number} ${pr.title} / staged: ${isStaged}`);
-              }
-
               const releasable = merged.filter(pr => stagedPrs.includes(pr.number));
               core.info(`releasable PR count for issue #${issue.number}: ${releasable.length}`);
 
               for (const pr of releasable) {
-                core.info(`RELEASABLE PR #${pr.number} ${pr.title}`);
+                const alreadyReleased = releasedPrs.includes(pr.number);
+                core.info(`PR #${pr.number} ${pr.title} / already released: ${alreadyReleased}`);
+              }
+
+              const unreleased = releasable.filter(pr => !releasedPrs.includes(pr.number));
+              core.info(`unreleased PR count for issue #${issue.number}: ${unreleased.length}`);
+
+              for (const pr of unreleased) {
+                core.info(`UNRELEASED PR #${pr.number} ${pr.title}`);
               }
             }
