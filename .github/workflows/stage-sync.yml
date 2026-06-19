@@ -13,11 +13,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: List ready-for-stage issues and find merged PRs
+      - name: Checkout stage branch
+        uses: actions/checkout@v4
+        with:
+          ref: stage
+          fetch-depth: 0
+
+      - name: List ready-for-stage issues and compare with stage manifest
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require("fs");
             const { owner, repo } = context.repo;
+
+            const manifestPath = ".ops/stage-manifest.json";
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+            const stagedPrs = manifest.staged_prs || [];
+
+            core.info(`already staged PRs: ${JSON.stringify(stagedPrs)}`);
 
             const issues = await github.paginate(
               github.rest.issues.listForRepo,
@@ -33,27 +46,4 @@ jobs:
             core.info(`ready-for-stage issue count: ${issues.length}`);
 
             for (const issue of issues) {
-              core.info(`ISSUE #${issue.number} ${issue.title}`);
-
-              const prs = await github.paginate(
-                github.rest.pulls.list,
-                {
-                  owner,
-                  repo,
-                  state: "closed",
-                  base: "develop",
-                  per_page: 100
-                }
-              );
-
-              const merged = prs.filter(pr =>
-                pr.merged_at &&
-                pr.title.includes(`[#${issue.number}]`)
-              );
-
-              core.info(`matched merged PR count for issue #${issue.number}: ${merged.length}`);
-
-              for (const pr of merged) {
-                core.info(`PR #${pr.number} ${pr.title}`);
-              }
-            }
+              core.info(`ISSUE #${issue.number}
