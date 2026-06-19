@@ -9,7 +9,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  find-ready-issues:
+  sync-stage:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,7 +19,12 @@ jobs:
           ref: stage
           fetch-depth: 0
 
-      - name: List ready-for-stage issues and compare with stage manifest
+      - name: Fetch all branches
+        run: |
+          git fetch origin +refs/heads/*:refs/remotes/origin/*
+
+      - name: Build sync plan
+        id: plan
         uses: actions/github-script@v7
         with:
           script: |
@@ -43,38 +48,99 @@ jobs:
               }
             );
 
-            core.info(`ready-for-stage issue count: ${issues.length}`);
+            core.info(`ready-for-stage issue count:${issues.length}`);
+
+            const prs = await github.paginate(
+              github.rest.pulls.list,
+              {
+                owner,
+                repo,
+                state: "closed",
+                base: "develop",
+                per_page: 100
+              }
+            );
+
+            const plan = [];
 
             for (const issue of issues) {
               core.info(`ISSUE #${issue.number} ${issue.title}`);
-
-              const prs = await github.paginate(
-                github.rest.pulls.list,
-                {
-                  owner,
-                  repo,
-                  state: "closed",
-                  base: "develop",
-                  per_page: 100
-                }
-              );
 
               const merged = prs.filter(pr =>
                 pr.merged_at &&
                 pr.title.includes(`[#${issue.number}]`)
               );
 
-              core.info(`matched merged PR count for issue #${issue.number}: ${merged.length}`);
-
-              for (const pr of merged) {
-                const alreadyStaged = stagedPrs.includes(pr.number);
-                core.info(`PR #${pr.number} ${pr.title} / already staged: ${alreadyStaged}`);
-              }
-
               const unstaged = merged.filter(pr => !stagedPrs.includes(pr.number));
+
               core.info(`unstaged PR count for issue #${issue.number}: ${unstaged.length}`);
 
               for (const pr of unstaged) {
-                core.info(`UNSTAGED PR #${pr.number} ${pr.title}`);
+                core.info(`UNSTAGED PR #${pr.number} ${pr.title} / merge_commit_sha=${pr.merge_commit_sha}`);
+                plan.push({
+                  issue_number: issue.number,
+                  pr_number: pr.number,
+                  pr_title: pr.title,
+                  merge_commit_sha: pr.merge_commit_sha
+                });
               }
             }
+
+            core.setOutput("plan", JSON.stringify(plan));
+
+      - name: Apply sync plan to stage
+        env:
+          PLAN_JSON: ${{ steps.plan.outputs.plan }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          plan = json.loads(os.environ["PLAN_JSON"] or "[]")
+          print(f"sync plan length: {len(plan)}")
+
+          if not plan:
+              print("nothing to sync")
+              raise SystemExit(0)
+
+          manifest_path = Path(".ops/stage-manifest.json")
+          manifest = json.loads(manifest_path.read_text())
+          staged_prs = manifest.get("staged_prs", [])
+
+          for item in plan:
+              sha = item["merge_commit_sha"]
+              pr_number = item["pr_number"]
+              title = item["pr_title"]
+
+              print(f"Cherry-picking PR #{pr_number}: {title} ({sha})")
+              subprocess.run(["git", "cherry-pick", sha], check=True)
+
+              if pr_number not in staged_prs:
+                  staged_prs.append(pr_number)
+
+          manifest["staged_prs"] = staged_prs
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+
+      - name: Commit and push stage changes
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .ops/stage-manifest.json app.txt
+          git commit -m "stage sync from develop" 
+          git push origin HEAD:stage
+
+      - name: Show stage status
+        run: |
+          echo "----- app.txt -----"
+          cat app.txt
+          echo "----- manifest -----"
+          cat .ops/stage-manifest.json
