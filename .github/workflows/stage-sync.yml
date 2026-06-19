@@ -149,3 +149,36 @@ jobs:
           cat app.txt
           echo "----- manifest -----"
           cat .ops/stage-manifest.json
+
+      - name: Update issue labels after successful sync
+        uses: actions/github-script@v7
+        env:
+          PLAN_JSON: ${{ steps.plan.outputs.plan }}
+        with:
+          script: |
+            const plan = JSON.parse(process.env.PLAN_JSON || "[]");
+            const { owner, repo } = context.repo;
+
+            const uniqueIssueNumbers = [...new Set(plan.map(item => item.issue_number))];
+
+            for (const issueNumber of uniqueIssueNumbers) {
+              core.info(`Updating labels for issue #${issueNumber}`);
+
+              try {
+                await github.rest.issues.removeLabel({
+                  owner,
+                  repo,
+                  issue_number: issueNumber,
+                  name: "ready-for-stage"
+                });
+              } catch (error) {
+                core.info(`ready-for-stage label was not present on issue #${issueNumber}`);
+              }
+
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                labels: ["staged"]
+              });
+            }
