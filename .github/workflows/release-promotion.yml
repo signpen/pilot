@@ -95,7 +95,7 @@ jobs:
               day: "2-digit"
             }).format(new Date());
             
-            core.setOutput("branch_name", `promote/${today}`);
+            core.setOutput("branch_name", `promote/${today}-${context.runNumber}`);
             core.setOutput("plan", JSON.stringify(plan));
 
       - name: Create promotion branch from main
