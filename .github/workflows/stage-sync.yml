@@ -46,4 +46,35 @@ jobs:
             core.info(`ready-for-stage issue count: ${issues.length}`);
 
             for (const issue of issues) {
-              core.info(`ISSUE #${issue.number}
+              core.info(`ISSUE #${issue.number} ${issue.title}`);
+
+              const prs = await github.paginate(
+                github.rest.pulls.list,
+                {
+                  owner,
+                  repo,
+                  state: "closed",
+                  base: "develop",
+                  per_page: 100
+                }
+              );
+
+              const merged = prs.filter(pr =>
+                pr.merged_at &&
+                pr.title.includes(`[#${issue.number}]`)
+              );
+
+              core.info(`matched merged PR count for issue #${issue.number}: ${merged.length}`);
+
+              for (const pr of merged) {
+                const alreadyStaged = stagedPrs.includes(pr.number);
+                core.info(`PR #${pr.number} ${pr.title} / already staged: ${alreadyStaged}`);
+              }
+
+              const unstaged = merged.filter(pr => !stagedPrs.includes(pr.number));
+              core.info(`unstaged PR count for issue #${issue.number}: ${unstaged.length}`);
+
+              for (const pr of unstaged) {
+                core.info(`UNSTAGED PR #${pr.number} ${pr.title}`);
+              }
+            }
