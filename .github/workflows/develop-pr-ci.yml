@@ -1,0 +1,54 @@
+name: Develop PR CI
+
+on:
+  pull_request:
+    branches:
+      - develop
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: develop-pr-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Ant WAR on JDK 8
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Temurin JDK 8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '8'
+
+      - name: Install Apache Ant
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ant
+
+      - name: Show tool versions
+        run: |
+          java -version
+          javac -version
+          ant -version
+
+      - name: Build WAR
+        run: ant war
+
+      - name: Verify artifact
+        run: test -f dist/pilot.war
+
+      - name: Upload WAR artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pilot-war
+          path: dist/pilot.war
+          if-no-files-found: error
