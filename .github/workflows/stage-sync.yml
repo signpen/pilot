@@ -66,14 +66,28 @@ jobs:
               }
             );
 
+            const issueTitleToBranchName = (title) => {
+              const normalizedTitle = title.trim().replace(/\s+/g, "-");
+              const isValid = /^SPMSTDPL1-\d+(?:-.+)?$/.test(normalizedTitle);
+              return isValid ? normalizedTitle : null;
+            };
+
             const plan = [];
 
             for (const issue of issues) {
               core.info(`ISSUE #${issue.number} ${issue.title}`);
 
+              const expectedBranch = issueTitleToBranchName(issue.title);
+              if (!expectedBranch) {
+                core.warning(`Skipping issue #${issue.number}: title does not map to expected branch format: ${issue.title}`);
+                continue;
+              }
+
+              core.info(`Expected branch for issue #${issue.number}: ${expectedBranch}`);
+
               const merged = prs.filter(pr =>
                 pr.merged_at &&
-                pr.title.includes(`[#${issue.number}]`)
+                pr.head.ref === expectedBranch
               );
 
               const unstaged = merged.filter(pr => !stagedPrs.includes(pr.number));
@@ -81,9 +95,11 @@ jobs:
               core.info(`unstaged PR count for issue #${issue.number}: ${unstaged.length}`);
 
               for (const pr of unstaged) {
-                core.info(`UNSTAGED PR #${pr.number} ${pr.title} / merge_commit_sha=${pr.merge_commit_sha}`);
+                core.info(`UNSTAGED PR #${pr.number} ${pr.title} / head.ref=${pr.head.ref} / merge_commit_sha=${pr.merge_commit_sha}`);
                 plan.push({
                   issue_number: issue.number,
+                  issue_title: issue.title,
+                  expected_branch: expectedBranch,
                   pr_number: pr.number,
                   pr_title: pr.title,
                   merge_commit_sha: pr.merge_commit_sha
@@ -182,14 +198,26 @@ jobs:
               }
             );
 
+            const issueTitleToBranchName = (title) => {
+              const normalizedTitle = title.trim().replace(/\s+/g, "-");
+              const isValid = /^SPMSTDPL1-\d+(?:-.+)?$/.test(normalizedTitle);
+              return isValid ? normalizedTitle : null;
+            };
+
             for (const issue of issues) {
+              const expectedBranch = issueTitleToBranchName(issue.title);
+              if (!expectedBranch) {
+                core.warning(`Skipping issue #${issue.number}: title does not map to expected branch format: ${issue.title}`);
+                continue;
+              }
+
               const merged = prs.filter(pr =>
-                pr.merged_at && pr.title.includes(`[#${issue.number}]`)
+                pr.merged_at && pr.head.ref === expectedBranch
               );
 
               const allStaged = merged.length > 0 && merged.every(pr => stagedPrs.includes(pr.number));
 
-              core.info(`Issue #${issue.number} all staged: ${allStaged}`);
+              core.info(`Issue #${issue.number} (${expectedBranch}) all staged: ${allStaged}`);
 
               if (!allStaged) continue;
 
