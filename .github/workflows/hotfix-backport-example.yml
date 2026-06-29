@@ -1,0 +1,217 @@
+name: Hotfix Backport Example
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - product
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Cherry-pick할 source commit SHA (optional; 비우면 merged PR의 merge_commit_sha 사용)"
+        required: false
+        type: string
+      source_pr:
+        description: "Backport 대상 PR 번호 (optional; 수동 실행 시 브랜치명/PR 제목 생성에 사용)"
+        required: false
+        type: string
+      target_branch:
+        description: "Backport 대상 브랜치"
+        required: true
+        default: develop
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  backport-hotfix:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'product')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch || 'develop' }}
+          fetch-depth: 0
+
+      - name: Fetch all branches
+        run: git fetch origin +refs/heads/*:refs/remotes/origin/*
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Build backport context
+        id: ctx
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const isDispatch = context.eventName === 'workflow_dispatch';
+            const targetBranch = isDispatch
+              ? (core.getInput('target_branch') || 'develop')
+              : 'develop';
+
+            const inputSha = isDispatch ? (core.getInput('source_sha') || '').trim() : '';
+            const inputPrNumber = isDispatch ? (core.getInput('source_pr') || '').trim() : '';
+
+            let sourceSha;
+            let sourcePrNumber;
+            let sourcePrTitle;
+
+            if (isDispatch) {
+              sourceSha = inputSha;
+              sourcePrNumber = inputPrNumber || 'manual';
+              sourcePrTitle = inputPrNumber
+                ? `manual backport for PR #${inputPrNumber}`
+                : 'manual hotfix backport';
+            } else {
+              const pr = context.payload.pull_request;
+              sourceSha = pr.merge_commit_sha;
+              sourcePrNumber = String(pr.number);
+              sourcePrTitle = pr.title;
+            }
+
+            if (!sourceSha) {
+              core.setFailed('source commit SHA를 찾지 못했습니다. workflow_dispatch에서는 source_sha를 입력하세요.');
+              return;
+            }
+
+            const safePr = String(sourcePrNumber).replace(/[^0-9A-Za-z._-]/g, '-');
+            const branchName = `backport/hotfix-pr-${safePr}-to-${targetBranch}`;
+            const prTitle = `[BACKPORT] hotfix #${sourcePrNumber} -> ${targetBranch}`;
+            const prBody = [
+              '## Backport Summary',
+              '',
+              `- Source PR: ${sourcePrNumber === 'manual' ? 'manual' : `#${sourcePrNumber}`}`,
+              `- Source commit: \`${sourceSha}\``,
+              `- Source title: ${sourcePrTitle}`,
+              `- Target branch: \`${targetBranch}\``,
+              '',
+              '> This PR was created automatically by `.github/workflows/hotfix-backport-example.yml`.',
+              '> If cherry-pick conflicts occur, resolve them manually on this branch and complete the PR.'
+            ].join('\n');
+
+            core.setOutput('target_branch', targetBranch);
+            core.setOutput('source_sha', sourceSha);
+            core.setOutput('source_pr_number', sourcePrNumber);
+            core.setOutput('source_pr_title', sourcePrTitle);
+            core.setOutput('branch_name', branchName);
+            core.setOutput('pr_title', prTitle);
+            core.setOutput('pr_body', prBody);
+
+      - name: Create working branch
+        env:
+          BRANCH_NAME: ${{ steps.ctx.outputs.branch_name }}
+        run: |
+          git checkout -b "$BRANCH_NAME"
+
+      - name: Cherry-pick hotfix commit
+        id: cherry_pick
+        env:
+          SOURCE_SHA: ${{ steps.ctx.outputs.source_sha }}
+        run: |
+          set +e
+          git cherry-pick -x "$SOURCE_SHA"
+          status=$?
+
+          if [ $status -ne 0 ]; then
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            echo "Cherry-pick conflict detected for $SOURCE_SHA"
+            git status --short
+            git cherry-pick --abort || true
+            exit 0
+          fi
+
+          echo "result=success" >> "$GITHUB_OUTPUT"
+
+      - name: Push backport branch
+        if: steps.cherry_pick.outputs.result == 'success'
+        env:
+          BRANCH_NAME: ${{ steps.ctx.outputs.branch_name }}
+        run: |
+          git push origin "$BRANCH_NAME"
+
+      - name: Create or reuse backport PR
+        if: steps.cherry_pick.outputs.result == 'success'
+        uses: actions/github-script@v7
+        env:
+          BRANCH_NAME: ${{ steps.ctx.outputs.branch_name }}
+          TARGET_BRANCH: ${{ steps.ctx.outputs.target_branch }}
+          PR_TITLE: ${{ steps.ctx.outputs.pr_title }}
+          PR_BODY: ${{ steps.ctx.outputs.pr_body }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const head = `${owner}:${process.env.BRANCH_NAME}`;
+            const base = process.env.TARGET_BRANCH;
+
+            const existing = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              head,
+              base,
+              per_page: 100
+            });
+
+            if (existing.length > 0) {
+              core.info(`Backport PR already exists: #${existing[0].number}`);
+              core.setOutput('pr_number', String(existing[0].number));
+              return;
+            }
+
+            const created = await github.rest.pulls.create({
+              owner,
+              repo,
+              title: process.env.PR_TITLE,
+              head: process.env.BRANCH_NAME,
+              base,
+              body: process.env.PR_BODY
+            });
+
+            core.info(`Created backport PR #${created.data.number}`);
+            core.setOutput('pr_number', String(created.data.number));
+
+      - name: Comment on source PR when conflict occurs
+        if: github.event_name == 'pull_request' && steps.cherry_pick.outputs.result == 'conflict'
+        uses: actions/github-script@v7
+        env:
+          SOURCE_SHA: ${{ steps.ctx.outputs.source_sha }}
+          TARGET_BRANCH: ${{ steps.ctx.outputs.target_branch }}
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: [
+                '자동 backport를 시도했지만 cherry-pick conflict가 발생했습니다.',
+                '',
+                `- Source commit: \`${process.env.SOURCE_SHA}\``,
+                `- Target branch: \`${process.env.TARGET_BRANCH}\``,
+                '',
+                '수동으로 backport 브랜치를 생성해서 conflict를 해소한 뒤 develop PR을 진행하세요.'
+              ].join('\n')
+            });
+
+      - name: Workflow summary
+        run: |
+          echo "## Hotfix Backport Result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Target branch: \\`${{ steps.ctx.outputs.target_branch }}\\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Source commit: \\`${{ steps.ctx.outputs.source_sha }}\\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Working branch: \\`${{ steps.ctx.outputs.branch_name }}\\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Cherry-pick result: \\`${{ steps.cherry_pick.outputs.result }}\\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.cherry_pick.outputs.result }}" = "success" ]; then
+            echo "- Backport PR: created or reused successfully" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Backport PR: not created because manual conflict resolution is required" >> "$GITHUB_STEP_SUMMARY"
+          fi
