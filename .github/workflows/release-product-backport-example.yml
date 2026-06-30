@@ -85,17 +85,27 @@ jobs:
             const releaseBranch = releasePr.head.ref;
             const releasePrTitle = releasePr.title;
 
-            const mergedPrs = await github.paginate(github.rest.pulls.list, {
+            const releaseCommits = await github.paginate(github.rest.pulls.listCommits, {
+              owner,
+              repo,
+              pull_number: releasePrNumber,
+              per_page: 100
+            });
+            const releaseCommitShas = new Set(releaseCommits.map(commit => commit.sha));
+
+            const closedPrs = await github.paginate(github.rest.pulls.list, {
               owner,
               repo,
               state: 'closed',
-              base: releaseBranch,
               per_page: 100
             });
 
-            const hotfixPrs = mergedPrs
+            const hotfixCandidates = closedPrs
               .filter(pr => pr.merged_at)
-              .filter(pr => pr.head.ref && pr.head.ref.startsWith('hotfix/'))
+              .filter(pr => pr.head.ref && pr.head.ref.startsWith('hotfix/'));
+
+            const hotfixPrs = hotfixCandidates
+              .filter(pr => pr.merge_commit_sha && releaseCommitShas.has(pr.merge_commit_sha))
               .sort((a, b) => new Date(a.merged_at) - new Date(b.merged_at));
 
             const plan = hotfixPrs.map(pr => ({
@@ -123,11 +133,15 @@ jobs:
             ].join('\n');
 
             core.info(`release branch: ${releaseBranch}`);
+            core.info(`release commit count: ${releaseCommits.length}`);
+            core.info(`hotfix candidate count: ${hotfixCandidates.length}`);
             core.info(`hotfix PR count: ${plan.length}`);
 
             core.setOutput('release_pr_number', String(releasePrNumber));
             core.setOutput('release_branch', releaseBranch);
             core.setOutput('release_pr_title', releasePrTitle);
+            core.setOutput('release_commit_count', String(releaseCommits.length));
+            core.setOutput('hotfix_candidate_count', String(hotfixCandidates.length));
             core.setOutput('target_branch', targetBranch);
             core.setOutput('branch_name', branchName);
             core.setOutput('pr_title', prTitle);
@@ -316,9 +330,11 @@ jobs:
           echo "- Release PR: #${{ steps.ctx.outputs.release_pr_number }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- Release branch: \`${{ steps.ctx.outputs.release_branch }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Target branch: \`${{ steps.ctx.outputs.target_branch }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Hotfix PR count: \`${{ steps.ctx.outputs.plan_count }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Release PR commit count: \`${{ steps.ctx.outputs.release_commit_count }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Hotfix candidate count: \`${{ steps.ctx.outputs.hotfix_candidate_count }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Matched hotfix PR count: \`${{ steps.ctx.outputs.plan_count }}\`" >> "$GITHUB_STEP_SUMMARY"
           if [ "${{ steps.ctx.outputs.plan_count }}" = "0" ]; then
-            echo "- Result: no hotfix PRs found in this release branch; no backport PR created" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Result: no hotfix PRs found in this release PR; no backport PR created" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "- Cherry-pick result: \`${{ steps.cherry_pick.outputs.result }}\`" >> "$GITHUB_STEP_SUMMARY"
           fi
