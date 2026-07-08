@@ -1,0 +1,82 @@
+name: PR Branch Policy
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - edited
+      - ready_for_review
+    branches:
+      - develop
+      - product
+      - 'release-hotfix/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-branch-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate-pr-branch-policy:
+    name: Validate PR source branch policy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate source branch against target branch
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+
+          base="${BASE_REF}"
+          head="${HEAD_REF}"
+          allowed="false"
+          rule=""
+
+          case "$base" in
+            develop)
+              if [[ "$head" == feature/* || "$head" == bugfix/* ]]; then
+                allowed="true"
+                rule="develop <- feature/* | bugfix/*"
+              fi
+              ;;
+            release-hotfix/*)
+              if [[ "$head" == hotfix/* ]]; then
+                allowed="true"
+                rule="release-hotfix/* <- hotfix/*"
+              fi
+              ;;
+            product)
+              if [[ "$head" == release/* || "$head" == release-hotfix/* ]]; then
+                allowed="true"
+                rule="product <- release/* | release-hotfix/*"
+              fi
+              ;;
+            *)
+              echo "Base branch '$base' is outside the guarded policy scope."
+              exit 0
+              ;;
+          esac
+
+          if [[ "$allowed" != "true" ]]; then
+            echo "::error title=PR branch policy violation::PR from '$head' to '$base' is not allowed."
+            echo "Allowed rules:"
+            echo "  - develop <- feature/* | bugfix/*"
+            echo "  - release-hotfix/* <- hotfix/*"
+            echo "  - product <- release/* | release-hotfix/*"
+            exit 1
+          fi
+
+          {
+            echo "## PR Branch Policy"
+            echo ""
+            echo "- Base branch: \`$base\`"
+            echo "- Head branch: \`$head\`"
+            echo "- Matched rule: \`$rule\`"
+            echo "- Result: ✅ allowed"
+          } >> "$GITHUB_STEP_SUMMARY"
