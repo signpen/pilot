@@ -55,8 +55,9 @@ jobs:
           script: |
             const isDispatch = context.eventName === 'workflow_dispatch';
             const { owner, repo } = context.repo;
+            const dispatchInputs = context.payload.inputs || {};
             const targetBranch = isDispatch
-              ? (core.getInput('target_branch') || 'develop').trim()
+              ? String(dispatchInputs.target_branch || 'develop').trim()
               : 'develop';
 
             if (!targetBranch) {
@@ -65,7 +66,7 @@ jobs:
             }
 
             const releasePrNumber = isDispatch
-              ? Number((core.getInput('release_pr_number') || '').trim())
+              ? Number(String(dispatchInputs.release_pr_number || '').trim())
               : context.payload.pull_request.number;
 
             if (!releasePrNumber || Number.isNaN(releasePrNumber)) {
