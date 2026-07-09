@@ -1,0 +1,340 @@
+name: Release Product Backport Example
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - product
+  workflow_dispatch:
+    inputs:
+      release_pr_number:
+        description: "product로 머지된 release PR 번호 (수동 실행 테스트용)"
+        required: true
+        type: string
+      target_branch:
+        description: "Backport 대상 브랜치"
+        required: true
+        default: develop
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  backport-hotfixes-from-release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'product' &&
+        startsWith(github.event.pull_request.head.ref, 'release/')
+      )
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch || 'develop' }}
+          fetch-depth: 0
+
+      - name: Fetch all branches
+        run: git fetch origin +refs/heads/*:refs/remotes/origin/*
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Build release backport plan
+        id: ctx
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const isDispatch = context.eventName === 'workflow_dispatch';
+            const { owner, repo } = context.repo;
+            const targetBranch = isDispatch
+              ? (core.getInput('target_branch') || 'develop').trim()
+              : 'develop';
+
+            const releasePrNumber = isDispatch
+              ? Number((core.getInput('release_pr_number') || '').trim())
+              : context.payload.pull_request.number;
+
+            if (!releasePrNumber || Number.isNaN(releasePrNumber)) {
+              core.setFailed('release_pr_number 값이 올바르지 않습니다.');
+              return;
+            }
+
+            const releasePr = isDispatch
+              ? (await github.rest.pulls.get({ owner, repo, pull_number: releasePrNumber })).data
+              : context.payload.pull_request;
+
+            if (releasePr.base.ref !== 'product') {
+              core.setFailed(`release PR #${releasePrNumber} 의 base 브랜치가 product가 아닙니다: ${releasePr.base.ref}`);
+              return;
+            }
+
+            if (!releasePr.head.ref.startsWith('release/')) {
+              core.setFailed(`release PR #${releasePrNumber} 의 head 브랜치가 release/* 형식이 아닙니다: ${releasePr.head.ref}`);
+              return;
+            }
+
+            const releaseBranch = releasePr.head.ref;
+            const releasePrTitle = releasePr.title;
+
+            const releaseCommits = await github.paginate(github.rest.pulls.listCommits, {
+              owner,
+              repo,
+              pull_number: releasePrNumber,
+              per_page: 100
+            });
+            const releaseCommitShas = new Set(releaseCommits.map(commit => commit.sha));
+
+            const closedPrs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'closed',
+              per_page: 100
+            });
+
+            const hotfixCandidates = closedPrs
+              .filter(pr => pr.merged_at)
+              .filter(pr => pr.head.ref && pr.head.ref.startsWith('hotfix/'));
+
+            const hotfixPrs = hotfixCandidates
+              .filter(pr => pr.merge_commit_sha && releaseCommitShas.has(pr.merge_commit_sha))
+              .sort((a, b) => new Date(a.merged_at) - new Date(b.merged_at));
+
+            const plan = hotfixPrs.map(pr => ({
+              pr_number: pr.number,
+              pr_title: pr.title,
+              head_ref: pr.head.ref,
+              merge_commit_sha: pr.merge_commit_sha
+            }));
+
+            const branchName = `backport/${releaseBranch.replace(/\//g, '-')}-to-${targetBranch}`;
+            const prTitle = `[BACKPORT] ${releaseBranch} hotfixes -> ${targetBranch}`;
+            const prBody = [
+              '## Backport Summary',
+              '',
+              `- Release PR: #${releasePrNumber}`,
+              `- Release title: ${releasePrTitle}`,
+              `- Release branch: \`${releaseBranch}\``,
+              `- Target branch: \`${targetBranch}\``,
+              `- Hotfix PR count: ${plan.length}`,
+              '',
+              '### Hotfix PRs included',
+              ...(plan.length > 0
+                ? plan.map(item => `- #${item.pr_number} (${item.head_ref}) - ${item.pr_title}`)
+                : ['- none'])
+            ].join('\n');
+
+            core.info(`release branch: ${releaseBranch}`);
+            core.info(`release commit count: ${releaseCommits.length}`);
+            core.info(`hotfix candidate count: ${hotfixCandidates.length}`);
+            core.info(`hotfix PR count: ${plan.length}`);
+
+            core.setOutput('release_pr_number', String(releasePrNumber));
+            core.setOutput('release_branch', releaseBranch);
+            core.setOutput('release_pr_title', releasePrTitle);
+            core.setOutput('release_commit_count', String(releaseCommits.length));
+            core.setOutput('hotfix_candidate_count', String(hotfixCandidates.length));
+            core.setOutput('target_branch', targetBranch);
+            core.setOutput('branch_name', branchName);
+            core.setOutput('pr_title', prTitle);
+            core.setOutput('pr_body', prBody);
+            core.setOutput('plan_json', JSON.stringify(plan));
+            core.setOutput('plan_count', String(plan.length));
+
+      - name: Prepare working branch
+        if: steps.ctx.outputs.plan_count != '0'
+        id: prepare_branch
+        env:
+          BRANCH_NAME: ${{ steps.ctx.outputs.branch_name }}
+          TARGET_BRANCH: ${{ steps.ctx.outputs.target_branch }}
+        run: |
+          if git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null 2>&1; then
+            echo "branch_exists=true" >> "$GITHUB_OUTPUT"
+            git fetch origin "$BRANCH_NAME:$BRANCH_NAME"
+            git checkout "$BRANCH_NAME"
+          else
+            echo "branch_exists=false" >> "$GITHUB_OUTPUT"
+            git checkout -b "$BRANCH_NAME" "origin/$TARGET_BRANCH"
+          fi
+
+      - name: Cherry-pick hotfix commits
+        if: steps.ctx.outputs.plan_count != '0'
+        id: cherry_pick
+        env:
+          PLAN_JSON: ${{ steps.ctx.outputs.plan_json }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          plan = json.loads(os.environ['PLAN_JSON'])
+          result = 'success'
+
+          def run(cmd, check=True, capture_output=False):
+              return subprocess.run(cmd, check=check, text=True, capture_output=capture_output)
+
+          def already_applied(sha: str) -> bool:
+              marker = f"cherry picked from commit {sha}"
+              completed = run(['git', 'log', '--grep', marker, '--format=%H', 'HEAD'], check=False, capture_output=True)
+              return bool(completed.stdout.strip())
+
+          def cherry_pick_sha(sha: str):
+              parents = run(['git', 'rev-list', '--parents', '-n', '1', sha], capture_output=True)
+              parent_count = max(len(parents.stdout.strip().split()) - 1, 0)
+              if parent_count > 1:
+                  cmd = ['git', 'cherry-pick', '-m', '1', '-x', sha]
+              else:
+                  cmd = ['git', 'cherry-pick', '-x', sha]
+              return run(cmd, check=False)
+
+          for item in plan:
+              sha = item['merge_commit_sha']
+              if not sha:
+                  print(f"missing merge_commit_sha for PR #{item['pr_number']}")
+                  result = 'conflict'
+                  run(['git', 'cherry-pick', '--abort'], check=False)
+                  break
+
+              if already_applied(sha):
+                  print(f"skip already applied PR #{item['pr_number']} ({sha})")
+                  continue
+
+              print(f"cherry-pick PR #{item['pr_number']} {item['pr_title']} ({sha})")
+              completed = cherry_pick_sha(sha)
+              if completed.returncode != 0:
+                  print(f"conflict while applying PR #{item['pr_number']} ({sha})")
+                  result = 'conflict'
+                  run(['git', 'status', '--short'], check=False)
+                  run(['git', 'cherry-pick', '--abort'], check=False)
+                  with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
+                      fh.write(f"FAILED_PR_NUMBER={item['pr_number']}\n")
+                      fh.write(f"FAILED_PR_TITLE={item['pr_title']}\n")
+                      fh.write(f"FAILED_PR_SHA={sha}\n")
+                  break
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as fh:
+              fh.write(f"result={result}\n")
+          PY
+
+      - name: Commit backport branch if changed
+        if: steps.ctx.outputs.plan_count != '0' && steps.cherry_pick.outputs.result == 'success'
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            echo "No new backport changes to commit"
+            exit 0
+          fi
+
+          git add -A
+          git commit -m "backport: sync hotfixes from ${{ steps.ctx.outputs.release_branch }} to ${{ steps.ctx.outputs.target_branch }}"
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+        id: commit_changes
+
+      - name: Push backport branch
+        if: >-
+          steps.ctx.outputs.plan_count != '0' &&
+          steps.cherry_pick.outputs.result == 'success' &&
+          (
+            steps.commit_changes.outputs.has_changes == 'true' ||
+            steps.prepare_branch.outputs.branch_exists == 'true'
+          )
+        env:
+          BRANCH_NAME: ${{ steps.ctx.outputs.branch_name }}
+        run: git push -u origin "$BRANCH_NAME"
+
+      - name: Create or reuse backport PR
+        if: >-
+          steps.ctx.outputs.plan_count != '0' &&
+          steps.cherry_pick.outputs.result == 'success' &&
+          (
+            steps.commit_changes.outputs.has_changes == 'true' ||
+            steps.prepare_branch.outputs.branch_exists == 'true'
+          )
+        uses: actions/github-script@v7
+        env:
+          BRANCH_NAME: ${{ steps.ctx.outputs.branch_name }}
+          TARGET_BRANCH: ${{ steps.ctx.outputs.target_branch }}
+          PR_TITLE: ${{ steps.ctx.outputs.pr_title }}
+          PR_BODY: ${{ steps.ctx.outputs.pr_body }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const existing = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              head: `${owner}:${process.env.BRANCH_NAME}`,
+              base: process.env.TARGET_BRANCH,
+              per_page: 100
+            });
+
+            if (existing.length > 0) {
+              core.info(`Backport PR already exists: #${existing[0].number}`);
+              core.setOutput('pr_number', String(existing[0].number));
+              return;
+            }
+
+            const created = await github.rest.pulls.create({
+              owner,
+              repo,
+              title: process.env.PR_TITLE,
+              head: process.env.BRANCH_NAME,
+              base: process.env.TARGET_BRANCH,
+              body: process.env.PR_BODY
+            });
+
+            core.info(`Created backport PR #${created.data.number}`);
+            core.setOutput('pr_number', String(created.data.number));
+
+      - name: Comment on release PR when conflict occurs
+        if: steps.ctx.outputs.plan_count != '0' && steps.cherry_pick.outputs.result == 'conflict'
+        uses: actions/github-script@v7
+        env:
+          RELEASE_PR_NUMBER: ${{ steps.ctx.outputs.release_pr_number }}
+          TARGET_BRANCH: ${{ steps.ctx.outputs.target_branch }}
+          FAILED_PR_NUMBER: ${{ env.FAILED_PR_NUMBER }}
+          FAILED_PR_TITLE: ${{ env.FAILED_PR_TITLE }}
+          FAILED_PR_SHA: ${{ env.FAILED_PR_SHA }}
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.RELEASE_PR_NUMBER),
+              body: [
+                '자동 backport를 시도했지만 conflict가 발생했습니다.',
+                '',
+                `- Target branch: \`${process.env.TARGET_BRANCH}\``,
+                `- Failed hotfix PR: #${process.env.FAILED_PR_NUMBER || 'unknown'}`,
+                `- Failed title: ${process.env.FAILED_PR_TITLE || 'unknown'}`,
+                `- Failed commit: \`${process.env.FAILED_PR_SHA || 'unknown'}\``,
+                '',
+                '수동으로 develop backport 브랜치를 생성해 conflict를 해소한 뒤 PR을 진행하세요.'
+              ].join('\n')
+            });
+
+      - name: Workflow summary
+        run: |
+          echo "## Release Product Backport Result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Release PR: #${{ steps.ctx.outputs.release_pr_number }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Release branch: \`${{ steps.ctx.outputs.release_branch }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Target branch: \`${{ steps.ctx.outputs.target_branch }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Release PR commit count: \`${{ steps.ctx.outputs.release_commit_count }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Hotfix candidate count: \`${{ steps.ctx.outputs.hotfix_candidate_count }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Matched hotfix PR count: \`${{ steps.ctx.outputs.plan_count }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.ctx.outputs.plan_count }}" = "0" ]; then
+            echo "- Result: no hotfix PRs found in this release PR; no backport PR created" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- Cherry-pick result: \`${{ steps.cherry_pick.outputs.result }}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
