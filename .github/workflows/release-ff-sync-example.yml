@@ -1,0 +1,188 @@
+name: Release Fast-Forward Sync Example
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - develop
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: "Optional release/* branch to sync explicitly"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: release-ff-sync
+  cancel-in-progress: false
+
+jobs:
+  sync-release-from-develop:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.pull_request.merged == true &&
+        github.event.pull_request.base.ref == 'develop'
+      )
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Fetch all branches
+        run: git fetch origin +refs/heads/*:refs/remotes/origin/*
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve active release branch
+        id: ctx
+        env:
+          INPUT_RELEASE_BRANCH: ${{ inputs.release_branch }}
+        run: |
+          set -euo pipefail
+
+          input_branch="${INPUT_RELEASE_BRANCH:-}"
+          input_branch="${input_branch#origin/}"
+
+          if [[ -n "$input_branch" ]]; then
+            if [[ "$input_branch" != release/* ]]; then
+              echo "Manual input must match release/*: $input_branch" >&2
+              exit 1
+            fi
+
+            if ! git show-ref --verify --quiet "refs/remotes/origin/$input_branch"; then
+              echo "Requested release branch not found on origin: $input_branch" >&2
+              exit 1
+            fi
+
+            release_branch="$input_branch"
+            release_count=1
+            selection_mode="manual"
+          else
+            mapfile -t releases < <(
+              git for-each-ref --format='%(refname:short)' refs/remotes/origin/release/* \
+                | sed 's#^origin/##' \
+                | sort
+            )
+
+            release_count="${#releases[@]}"
+            selection_mode="auto"
+
+            if [[ "$release_count" -eq 0 ]]; then
+              echo "release_branch=" >> "$GITHUB_OUTPUT"
+              echo "release_count=0" >> "$GITHUB_OUTPUT"
+              echo "selection_mode=$selection_mode" >> "$GITHUB_OUTPUT"
+              echo "sync_state=no_release" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if [[ "$release_count" -gt 1 ]]; then
+              printf 'Expected at most one active release/* branch, found %s:\n' "$release_count" >&2
+              printf ' - %s\n' "${releases[@]}" >&2
+              exit 1
+            fi
+
+            release_branch="${releases[0]}"
+          fi
+
+          echo "release_branch=$release_branch" >> "$GITHUB_OUTPUT"
+          echo "release_count=$release_count" >> "$GITHUB_OUTPUT"
+          echo "selection_mode=$selection_mode" >> "$GITHUB_OUTPUT"
+          echo "sync_state=ready" >> "$GITHUB_OUTPUT"
+
+      - name: No active release branch
+        if: steps.ctx.outputs.sync_state == 'no_release'
+        run: |
+          echo "No active release/* branch found. Nothing to sync."
+          echo "## Release Fast-Forward Sync" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Result: no active \`release/*\` branch found" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Develop SHA: \`$(git rev-parse origin/develop)\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify fast-forward path
+        if: steps.ctx.outputs.sync_state == 'ready'
+        id: verify
+        env:
+          RELEASE_BRANCH: ${{ steps.ctx.outputs.release_branch }}
+        run: |
+          set -euo pipefail
+
+          develop_sha="$(git rev-parse origin/develop)"
+          release_sha="$(git rev-parse "origin/$RELEASE_BRANCH")"
+
+          echo "develop_sha=$develop_sha" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+
+          if [[ "$develop_sha" = "$release_sha" ]]; then
+            echo "result=already_up_to_date" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git merge-base --is-ancestor "origin/$RELEASE_BRANCH" origin/develop; then
+            echo "result=can_fast_forward" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Release branch $RELEASE_BRANCH has diverged from develop and cannot be fast-forwarded." >&2
+          echo "result=diverged" >> "$GITHUB_OUTPUT"
+          exit 1
+
+      - name: Fast-forward release branch
+        if: steps.verify.outputs.result == 'can_fast_forward'
+        env:
+          RELEASE_BRANCH: ${{ steps.ctx.outputs.release_branch }}
+        run: |
+          set -euo pipefail
+
+          git checkout -B "$RELEASE_BRANCH" "origin/$RELEASE_BRANCH"
+          git merge --ff-only origin/develop
+          git push origin HEAD:"$RELEASE_BRANCH"
+
+      - name: Workflow summary
+        if: always()
+        env:
+          SYNC_STATE: ${{ steps.ctx.outputs.sync_state }}
+          SELECTION_MODE: ${{ steps.ctx.outputs.selection_mode }}
+          RELEASE_BRANCH: ${{ steps.ctx.outputs.release_branch }}
+          VERIFY_RESULT: ${{ steps.verify.outputs.result }}
+          DEVELOP_SHA: ${{ steps.verify.outputs.develop_sha }}
+          RELEASE_SHA: ${{ steps.verify.outputs.release_sha }}
+        run: |
+          echo "## Release Fast-Forward Sync" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Selection mode: \`${SELECTION_MODE:-auto}\`" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$SYNC_STATE" = "no_release" ]]; then
+            echo "- Result: no active \`release/*\` branch found" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "- Release branch: \`${RELEASE_BRANCH}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Previous release SHA: \`${RELEASE_SHA:-n/a}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Develop SHA: \`${DEVELOP_SHA:-n/a}\`" >> "$GITHUB_STEP_SUMMARY"
+
+          case "$VERIFY_RESULT" in
+            already_up_to_date)
+              echo "- Result: already up to date" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            can_fast_forward)
+              echo "- Result: fast-forward sync completed" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            diverged)
+              echo "- Result: failed - release branch diverged from develop" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "- Result: workflow ended before verification completed" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
