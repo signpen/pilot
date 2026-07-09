@@ -1,0 +1,222 @@
+name: Release Promotion
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  promote-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch all branches
+        run: |
+          git fetch origin +refs/heads/*:refs/remotes/origin/*
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Build release plan
+        id: plan
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const { owner, repo } = context.repo;
+
+            const releaseManifest = JSON.parse(fs.readFileSync(".ops/release-manifest.json", "utf8"));
+            const releasedPrs = releaseManifest.released_prs || [];
+
+            const stageManifestText = require("child_process")
+              .execSync("git show origin/stage:.ops/stage-manifest.json", { encoding: "utf8" });
+            const stageManifest = JSON.parse(stageManifestText);
+            const stagedPrs = stageManifest.staged_prs || [];
+
+            const issues = await github.paginate(
+              github.rest.issues.listForRepo,
+              {
+                owner,
+                repo,
+                state: "open",
+                labels: "ready-for-release", 
+                per_page: 100
+              }
+            );
+
+            const prs = await github.paginate(
+              github.rest.pulls.list,
+              {
+                owner,
+                repo,
+                state: "closed",
+                base: "develop",
+                per_page: 100
+              }
+            );
+
+            const plan = [];
+
+            for (const issue of issues) {
+              const merged = prs.filter(pr =>
+                pr.merged_at &&
+                pr.title.includes(`[#${issue.number}]`)
+              );
+
+              const releasable = merged.filter(pr => stagedPrs.includes(pr.number));
+              const unreleased = releasable.filter(pr => !releasedPrs.includes(pr.number));
+
+              for (const pr of unreleased) {
+                core.info(`UNRELEASED PR #${pr.number} ${pr.title} / merge_commit_sha=${pr.merge_commit_sha}`);
+                plan.push({
+                  issue_number: issue.number,
+                  pr_number: pr.number,
+                  pr_title: pr.title,
+                  merge_commit_sha: pr.merge_commit_sha
+                });
+              }
+            }
+
+            const today = new Intl.DateTimeFormat("sv-SE", {
+              timeZone: "Asia/Seoul",
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit"
+            }).format(new Date());
+            
+            core.setOutput("branch_name", `promote/${today}-${context.runNumber}`);
+            core.setOutput("plan", JSON.stringify(plan));
+
+      - name: Create promotion branch from main
+        env:
+          BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
+        run: |
+          git checkout -b "$BRANCH_NAME"
+
+      - name: Apply release plan
+        env:
+          PLAN_JSON: ${{ steps.plan.outputs.plan }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          plan = json.loads(os.environ["PLAN_JSON"] or "[]")
+          print(f"release plan length: {len(plan)}")
+
+          if not plan:
+              print("nothing to promote")
+              raise SystemExit(0)
+          manifest_path = Path(".ops/release-manifest.json")
+          manifest = json.loads(manifest_path.read_text())
+          released_prs = manifest.get("released_prs", [])
+
+          for item in plan:
+              sha = item["merge_commit_sha"]
+              pr_number = item["pr_number"]
+              title = item["pr_title"]
+
+              print(f"Cherry-picking PR #{pr_number}: {title} ({sha})")
+              subprocess.run(["git", "cherry-pick", sha], check=True)
+
+              if pr_number not in released_prs:
+                  released_prs.append(pr_number)
+
+          manifest["released_prs"] = released_prs
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+          PY
+
+      - name: Commit manifest if needed
+        run: |
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git add .ops/release-manifest.json
+          git commit -m "update release manifest"
+
+      - name: Push promotion branch
+        env:
+          BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
+        run: |
+          git push origin "$BRANCH_NAME"
+
+      - name: Show promotion branch status
+        run: |
+          echo "----- current branch -----"
+          git branch --show-current
+          echo "----- app.txt -----"
+          cat app.txt
+          echo "----- release manifest -----"
+          cat .ops/release-manifest.json
+
+      - name: Create promotion PR to main
+        uses: actions/github-script@v7
+        env:
+          BRANCH_NAME: ${{ steps.plan.outputs.branch_name }}
+          PLAN_JSON: ${{ steps.plan.outputs.plan }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const branchName = process.env.BRANCH_NAME;
+            const plan = JSON.parse(process.env.PLAN_JSON || "[]");
+
+            if (plan.length === 0) {
+              core.info("No promotion PR needed");
+              return;
+            }
+
+            const issueNumbers = [...new Set(plan.map(item => item.issue_number))];
+            const prNumbers = plan.map(item => item.pr_number);
+
+            const title = `[PROMOTE] ${branchName} -> main`;
+            const body = [
+              "## Promotion Summary",
+              "",
+              `- Branch: \`${branchName}\``,
+              `- Issue(s): ${issueNumbers.map(n => `#${n}`).join(", ")}`,
+              `- Develop PR(s): ${prNumbers.map(n => `#${n}`).join(", ")}`,
+              ""
+            ].join("\n");
+
+            const existing = await github.paginate(
+              github.rest.pulls.list,
+              {
+                owner,
+                repo,
+                state: "open",
+                base: "main",
+                head: `${owner}:${branchName}`,
+                per_page: 100
+              }
+            );
+
+            if (existing.length > 0) {
+              core.info(`Promotion PR already exists: #${existing[0].number}`);
+              return;
+            }
+
+            const created = await github.rest.pulls.create({
+              owner,
+              repo,
+              title,
+              head: branchName,
+              base: "main",
+              body
+            });
+
+            core.info(`Created promotion PR #${created.data.number}`);
