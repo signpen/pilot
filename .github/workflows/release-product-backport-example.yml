@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       release_pr_number:
-        description: "product로 머지된 release PR 번호 (수동 실행 테스트용)"
+        description: "product로 머지된 release-hotfix PR 번호 (수동 실행 테스트용)"
         required: true
         type: string
       target_branch:
@@ -29,7 +29,7 @@ jobs:
       (
         github.event.pull_request.merged == true &&
         github.event.pull_request.base.ref == 'product' &&
-        startsWith(github.event.pull_request.head.ref, 'release/')
+        startsWith(github.event.pull_request.head.ref, 'release-hotfix/')
       )
     runs-on: ubuntu-latest
 
@@ -77,8 +77,8 @@ jobs:
               return;
             }
 
-            if (!releasePr.head.ref.startsWith('release/')) {
-              core.setFailed(`release PR #${releasePrNumber} 의 head 브랜치가 release/* 형식이 아닙니다: ${releasePr.head.ref}`);
+            if (!releasePr.head.ref.startsWith('release-hotfix/')) {
+              core.setFailed(`release PR #${releasePrNumber} 의 head 브랜치가 release-hotfix/* 형식이 아닙니다: ${releasePr.head.ref}`);
               return;
             }
 
