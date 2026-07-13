@@ -179,6 +179,7 @@ jobs:
             echo "branch_exists=false" >> "$GITHUB_OUTPUT"
             git checkout -b "$BRANCH_NAME" "origin/$TARGET_BRANCH"
           fi
+          echo "base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Cherry-pick hotfix commits
         if: steps.ctx.outputs.plan_count != '0'
@@ -240,19 +241,21 @@ jobs:
               fh.write(f"result={result}\n")
           PY
 
-      - name: Commit backport branch if changed
+      - name: Detect new backport commits
         if: steps.ctx.outputs.plan_count != '0' && steps.cherry_pick.outputs.result == 'success'
         id: commit_changes
+        env:
+          BASE_SHA: ${{ steps.prepare_branch.outputs.base_sha }}
         run: |
-          if git diff --quiet && git diff --cached --quiet; then
+          CURRENT_SHA=$(git rev-parse HEAD)
+          if [ "$CURRENT_SHA" = "$BASE_SHA" ]; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
-            echo "No new backport changes to commit"
+            echo "No new backport changes to push"
             exit 0
           fi
 
-          git add -A
-          git commit -m "backport: sync hotfixes from ${{ steps.ctx.outputs.release_branch }} to ${{ steps.ctx.outputs.target_branch }}"
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          echo "New backport commits detected: $BASE_SHA -> $CURRENT_SHA"
 
       - name: Push backport branch
         if: >-
