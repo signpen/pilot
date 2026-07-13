@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   validate-pr-branch-policy:
+    if: ${{ !(github.event.pull_request.base.ref == 'develop' && startsWith(github.event.pull_request.head.ref, 'backport/')) }}
     name: Validate PR source branch policy
     runs-on: ubuntu-latest
 
