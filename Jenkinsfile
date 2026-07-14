@@ -16,19 +16,17 @@ pipeline {
         stage('Resolve deploy branch') {
             steps {
                 deleteDir()
-                git(
-                    branch: env.DEFAULT_DEPLOY_BRANCH,
-                    credentialsId: env.GIT_CREDENTIAL_ID,
-                    url: env.REPO_URL
-                )
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: "*/${env.DEFAULT_DEPLOY_BRANCH}"]],
+                    userRemoteConfigs: [[
+                        credentialsId: env.GIT_CREDENTIAL_ID,
+                        url: env.REPO_URL,
+                        refspec: "+refs/heads/${env.DEFAULT_DEPLOY_BRANCH}:refs/remotes/origin/${env.DEFAULT_DEPLOY_BRANCH} +refs/heads/release/*:refs/remotes/origin/release/* +refs/heads/release-hotfix/*:refs/remotes/origin/release-hotfix/*"
+                    ]]
+                ])
 
                 script {
-                    sh '''
-                        git fetch --prune origin \
-                          +refs/heads/release/*:refs/remotes/origin/release/* \
-                          +refs/heads/release-hotfix/*:refs/remotes/origin/release-hotfix/*
-                    '''
-
                     def releaseBranchesRaw = sh(
                         script: "git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/release | sort",
                         returnStdout: true
