@@ -6,7 +6,8 @@ pipeline {
     }
 
     environment {
-        REPO_URL = 'git@github.com:signpen/pilot.git'
+        REPO_URL = 'https://github.com/signpen/pilot.git'
+        GIT_CREDENTIAL_ID = 'github-credentials'
         DEFAULT_DEPLOY_BRANCH = 'develop'
         DEPLOY_BRANCH = ''
     }
@@ -14,26 +15,48 @@ pipeline {
     stages {
         stage('Resolve deploy branch') {
             steps {
+                deleteDir()
+                git(
+                    branch: env.DEFAULT_DEPLOY_BRANCH,
+                    credentialsId: env.GIT_CREDENTIAL_ID,
+                    url: env.REPO_URL
+                )
+
                 script {
+                    sh '''
+                        git fetch --prune origin \
+                          +refs/heads/release/*:refs/remotes/origin/release/* \
+                          +refs/heads/release-hotfix/*:refs/remotes/origin/release-hotfix/*
+                    '''
+
                     def releaseBranchesRaw = sh(
-                        script: "git ls-remote --heads '${env.REPO_URL}' 'release/*' | awk '{print \\$2}' | sed 's#refs/heads/##' | sort",
+                        script: "git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/release | sort",
+                        returnStdout: true
+                    ).trim()
+                    def releaseHotfixBranchesRaw = sh(
+                        script: "git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/release-hotfix | sort",
                         returnStdout: true
                     ).trim()
 
                     def releaseBranches = releaseBranchesRaw
                         ? releaseBranchesRaw.split("\\n").findAll { it?.trim() }
                         : []
+                    def releaseHotfixBranches = releaseHotfixBranchesRaw
+                        ? releaseHotfixBranchesRaw.split("\\n").findAll { it?.trim() }
+                        : []
+                    def activeBranches = releaseBranches + releaseHotfixBranches
 
-                    if (releaseBranches.size() > 1) {
-                        error "release 브랜치가 여러 개입니다: ${releaseBranches.join(', ')}"
+                    if (activeBranches.size() > 1) {
+                        error "배포 기준 브랜치가 2개 이상입니다. release/* 또는 release-hotfix/* 는 동시에 하나만 존재해야 합니다: ${activeBranches.join(', ')}"
                     }
 
-                    env.DEPLOY_BRANCH = releaseBranches
-                        ? releaseBranches[0]
+                    env.DEPLOY_BRANCH = activeBranches
+                        ? activeBranches[0]
                         : env.DEFAULT_DEPLOY_BRANCH
 
                     echo "Selected deploy branch: ${env.DEPLOY_BRANCH}"
-                    echo "Release branches found: ${releaseBranches ? releaseBranches.join(', ') : '(none)'}"
+                    echo "release/* branches found: ${releaseBranches ? releaseBranches.join(', ') : '(none)'}"
+                    echo "release-hotfix/* branches found: ${releaseHotfixBranches ? releaseHotfixBranches.join(', ') : '(none)'}"
                 }
             }
         }
@@ -41,11 +64,11 @@ pipeline {
         stage('Checkout deploy source') {
             steps {
                 deleteDir()
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: "*/${env.DEPLOY_BRANCH}"]],
-                    userRemoteConfigs: [[url: env.REPO_URL]]
-                ])
+                git(
+                    branch: env.DEPLOY_BRANCH,
+                    credentialsId: env.GIT_CREDENTIAL_ID,
+                    url: env.REPO_URL
+                )
                 sh 'git branch --show-current || true'
                 sh 'git rev-parse HEAD'
             }
