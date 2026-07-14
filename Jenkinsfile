@@ -1,3 +1,9 @@
+def selectedDeployBranch = null
+
+def defaultDeployBranchValue() {
+    return 'develop'
+}
+
 pipeline {
     agent any
 
@@ -16,17 +22,19 @@ pipeline {
         stage('Resolve deploy branch') {
             steps {
                 deleteDir()
-                checkout([
-                    $class: 'GitSCM',
-                    branches: [[name: "*/${env.DEFAULT_DEPLOY_BRANCH}"]],
-                    userRemoteConfigs: [[
-                        credentialsId: env.GIT_CREDENTIAL_ID,
-                        url: env.REPO_URL,
-                        refspec: "+refs/heads/${env.DEFAULT_DEPLOY_BRANCH}:refs/remotes/origin/${env.DEFAULT_DEPLOY_BRANCH} +refs/heads/release/*:refs/remotes/origin/release/* +refs/heads/release-hotfix/*:refs/remotes/origin/release-hotfix/*"
-                    ]]
-                ])
-
                 script {
+                    String defaultDeployBranch = (env.DEFAULT_DEPLOY_BRANCH ?: defaultDeployBranchValue()).trim()
+
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${defaultDeployBranch}"]],
+                        userRemoteConfigs: [[
+                            credentialsId: env.GIT_CREDENTIAL_ID,
+                            url: env.REPO_URL,
+                            refspec: "+refs/heads/${defaultDeployBranch}:refs/remotes/origin/${defaultDeployBranch} +refs/heads/release/*:refs/remotes/origin/release/* +refs/heads/release-hotfix/*:refs/remotes/origin/release-hotfix/*"
+                        ]]
+                    ])
+
                     def releaseBranchesRaw = sh(
                         script: "git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/release | sort",
                         returnStdout: true
@@ -43,7 +51,6 @@ pipeline {
                         ? releaseHotfixBranchesRaw.split("\\n").findAll { it?.trim() }
                         : []
                     def activeBranches = releaseBranches + releaseHotfixBranches
-                    String defaultDeployBranch = (env.DEFAULT_DEPLOY_BRANCH ?: 'develop').trim()
                     String deployBranch = activeBranches
                         ? activeBranches[0].trim()
                         : defaultDeployBranch
@@ -57,8 +64,10 @@ pipeline {
                     }
 
                     env.DEPLOY_BRANCH = deployBranch
+                    selectedDeployBranch = deployBranch
 
-                    echo "Selected deploy branch: ${env.DEPLOY_BRANCH}"
+                    echo "Selected deploy branch: ${deployBranch}"
+                    echo "Default deploy branch: ${defaultDeployBranch}"
                     echo "release/* branches found: ${releaseBranches ? releaseBranches.join(', ') : '(none)'}"
                     echo "release-hotfix/* branches found: ${releaseHotfixBranches ? releaseHotfixBranches.join(', ') : '(none)'}"
                 }
@@ -69,7 +78,12 @@ pipeline {
             steps {
                 deleteDir()
                 script {
-                    String branchToCheckout = (env.DEPLOY_BRANCH ?: env.DEFAULT_DEPLOY_BRANCH ?: 'develop').trim()
+                    String branchToCheckout = (
+                        selectedDeployBranch
+                            ?: env.DEPLOY_BRANCH
+                            ?: env.DEFAULT_DEPLOY_BRANCH
+                            ?: defaultDeployBranchValue()
+                    ).trim()
 
                     if (!branchToCheckout) {
                         error 'Checkout 대상 브랜치를 결정할 수 없습니다.'
@@ -81,8 +95,10 @@ pipeline {
                         url: env.REPO_URL
                     )
 
+                    selectedDeployBranch = branchToCheckout
                     env.DEPLOY_BRANCH = branchToCheckout
                 }
+                echo "Checkout deploy branch: ${selectedDeployBranch ?: env.DEPLOY_BRANCH}"
                 sh 'git branch --show-current || true'
                 sh 'git rev-parse HEAD'
             }
@@ -104,7 +120,7 @@ pipeline {
 
         stage('Deploy') {
             steps {
-                echo "Deploy target branch: ${env.DEPLOY_BRANCH}"
+                echo "Deploy target branch: ${selectedDeployBranch ?: env.DEPLOY_BRANCH ?: env.DEFAULT_DEPLOY_BRANCH ?: defaultDeployBranchValue()}"
                 sh '''
                     if [ -f dist/pilot.war ]; then
                       echo "Deploying dist/pilot.war from ${DEPLOY_BRANCH}"
