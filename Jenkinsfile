@@ -43,14 +43,20 @@ pipeline {
                         ? releaseHotfixBranchesRaw.split("\\n").findAll { it?.trim() }
                         : []
                     def activeBranches = releaseBranches + releaseHotfixBranches
+                    String defaultDeployBranch = (env.DEFAULT_DEPLOY_BRANCH ?: 'develop').trim()
+                    String deployBranch = activeBranches
+                        ? activeBranches[0].trim()
+                        : defaultDeployBranch
 
                     if (activeBranches.size() > 1) {
                         error "배포 기준 브랜치가 2개 이상입니다. release/* 또는 release-hotfix/* 는 동시에 하나만 존재해야 합니다: ${activeBranches.join(', ')}"
                     }
 
-                    env.DEPLOY_BRANCH = activeBranches
-                        ? activeBranches[0]
-                        : env.DEFAULT_DEPLOY_BRANCH
+                    if (!deployBranch) {
+                        error '배포 브랜치를 결정할 수 없습니다.'
+                    }
+
+                    env.DEPLOY_BRANCH = deployBranch
 
                     echo "Selected deploy branch: ${env.DEPLOY_BRANCH}"
                     echo "release/* branches found: ${releaseBranches ? releaseBranches.join(', ') : '(none)'}"
@@ -62,11 +68,21 @@ pipeline {
         stage('Checkout deploy source') {
             steps {
                 deleteDir()
-                git(
-                    branch: env.DEPLOY_BRANCH,
-                    credentialsId: env.GIT_CREDENTIAL_ID,
-                    url: env.REPO_URL
-                )
+                script {
+                    String branchToCheckout = (env.DEPLOY_BRANCH ?: env.DEFAULT_DEPLOY_BRANCH ?: 'develop').trim()
+
+                    if (!branchToCheckout) {
+                        error 'Checkout 대상 브랜치를 결정할 수 없습니다.'
+                    }
+
+                    git(
+                        branch: branchToCheckout,
+                        credentialsId: env.GIT_CREDENTIAL_ID,
+                        url: env.REPO_URL
+                    )
+
+                    env.DEPLOY_BRANCH = branchToCheckout
+                }
                 sh 'git branch --show-current || true'
                 sh 'git rev-parse HEAD'
             }
