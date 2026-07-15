@@ -1,5 +1,3 @@
-def selectedDeployBranch = null
-
 def defaultDeployBranchValue() {
     return 'develop'
 }
@@ -64,7 +62,8 @@ pipeline {
                     }
 
                     env.DEPLOY_BRANCH = deployBranch
-                    selectedDeployBranch = deployBranch
+                    writeFile file: '.deploy-branch', text: "${deployBranch}\n"
+                    stash name: 'deploy-branch-meta', includes: '.deploy-branch'
 
                     echo "Selected deploy branch: ${deployBranch}"
                     echo "Default deploy branch: ${defaultDeployBranch}"
@@ -77,9 +76,13 @@ pipeline {
         stage('Checkout deploy source') {
             steps {
                 deleteDir()
+                unstash 'deploy-branch-meta'
                 script {
+                    String resolvedDeployBranch = fileExists('.deploy-branch')
+                        ? readFile('.deploy-branch').trim()
+                        : ''
                     String branchToCheckout = (
-                        selectedDeployBranch
+                        resolvedDeployBranch
                             ?: env.DEPLOY_BRANCH
                             ?: env.DEFAULT_DEPLOY_BRANCH
                             ?: defaultDeployBranchValue()
@@ -95,10 +98,11 @@ pipeline {
                         url: env.REPO_URL
                     )
 
-                    selectedDeployBranch = branchToCheckout
                     env.DEPLOY_BRANCH = branchToCheckout
+                    writeFile file: '.deploy-branch', text: "${branchToCheckout}\n"
+
+                    echo "Checkout deploy branch: ${branchToCheckout}"
                 }
-                echo "Checkout deploy branch: ${selectedDeployBranch ?: env.DEPLOY_BRANCH}"
                 sh 'git branch --show-current || true'
                 sh 'git rev-parse HEAD'
             }
@@ -120,7 +124,14 @@ pipeline {
 
         stage('Deploy') {
             steps {
-                echo "Deploy target branch: ${selectedDeployBranch ?: env.DEPLOY_BRANCH ?: env.DEFAULT_DEPLOY_BRANCH ?: defaultDeployBranchValue()}"
+                script {
+                    String deployTargetBranch = fileExists('.deploy-branch')
+                        ? readFile('.deploy-branch').trim()
+                        : ((env.DEPLOY_BRANCH ?: env.DEFAULT_DEPLOY_BRANCH ?: defaultDeployBranchValue()).trim())
+
+                    env.DEPLOY_BRANCH = deployTargetBranch
+                    echo "Deploy target branch: ${deployTargetBranch}"
+                }
                 sh '''
                     if [ -f dist/pilot.war ]; then
                       echo "Deploying dist/pilot.war from ${DEPLOY_BRANCH}"
