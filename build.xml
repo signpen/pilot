@@ -1,31 +1,54 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<project name="pilot-web" default="war" basedir=".">
-    <description>Simple Ant-based Spring MVC sample for the pilot repository</description>
+<project name="pilot-web" default="help" basedir=".">
+    <description>
+        Compile once, then package per-server WAR files with env/server-specific config.properties.
+    </description>
 
     <property name="app.name" value="pilot"/>
     <property name="src.dir" value="src/main/java"/>
+    <property name="resources.dir" value="src/main/resources"/>
     <property name="web.dir" value="src/main/webapp"/>
-    <property name="lib.dir" value="lib"/>
+    <property name="lib.dir" value="${web.dir}/WEB-INF/lib"/>
+    <property name="legacy.lib.dir" value="lib"/>
+
     <property name="build.dir" value="build"/>
     <property name="classes.dir" value="${build.dir}/classes"/>
-    <property name="web.build.dir" value="${build.dir}/webapp"/>
+    <property name="stage.common.dir" value="${build.dir}/stage-common"/>
+    <property name="package.dir" value="${build.dir}/package"/>
     <property name="dist.dir" value="dist"/>
+
     <property name="java.source" value="1.8"/>
     <property name="java.target" value="1.8"/>
-    <property name="spring.version" value="4.3.30.RELEASE"/>
-    <property name="servlet.api.version" value="3.1.0"/>
-    <property name="commons.logging.version" value="1.2"/>
-    <property name="maven.repo" value="https://repo.maven.apache.org/maven2"/>
+
+    <!-- runtime input examples:
+         ./ant.sh dist-all -Ddeploy.env=staging
+         ./ant.sh war -Ddeploy.env=product -Ddeploy.server=web1
+    -->
+    <property name="deploy.env" value=""/>
+    <property name="deploy.server" value=""/>
 
     <path id="compile.classpath">
-        <fileset dir="${lib.dir}" includes="*.jar"/>
+        <fileset dir="${lib.dir}" includes="**/*.jar" erroronmissingdir="false"/>
+        <fileset dir="${legacy.lib.dir}" includes="**/*.jar" erroronmissingdir="false"/>
     </path>
 
-    <target name="init">
-        <mkdir dir="${lib.dir}"/>
-        <mkdir dir="${classes.dir}"/>
-        <mkdir dir="${web.build.dir}"/>
-        <mkdir dir="${dist.dir}"/>
+    <target name="help">
+        <echo><![CDATA[
+Usage:
+  ./ant.sh clean
+  ./ant.sh dist-all -Ddeploy.env=staging
+  ./ant.sh war -Ddeploy.env=product -Ddeploy.server=web1
+
+Expected config layout:
+  src/main/resources/servers/<env>/config-web1.properties
+  src/main/resources/servers/<env>/config-web2.properties
+  src/main/resources/servers/<env>/config-batch.properties
+
+Output examples:
+  dist/pilot-staging-web1.war
+  dist/pilot-staging-web2.war
+  dist/pilot-staging-batch.war
+        ]]></echo>
     </target>
 
     <target name="clean">
@@ -33,19 +56,36 @@
         <delete dir="${dist.dir}"/>
     </target>
 
-    <target name="bootstrap" depends="init" description="Download project dependencies from Maven Central">
-        <get src="${maven.repo}/org/springframework/spring-webmvc/${spring.version}/spring-webmvc-${spring.version}.jar" dest="${lib.dir}/spring-webmvc-${spring.version}.jar" skipexisting="true"/>
-        <get src="${maven.repo}/org/springframework/spring-web/${spring.version}/spring-web-${spring.version}.jar" dest="${lib.dir}/spring-web-${spring.version}.jar" skipexisting="true"/>
-        <get src="${maven.repo}/org/springframework/spring-context/${spring.version}/spring-context-${spring.version}.jar" dest="${lib.dir}/spring-context-${spring.version}.jar" skipexisting="true"/>
-        <get src="${maven.repo}/org/springframework/spring-beans/${spring.version}/spring-beans-${spring.version}.jar" dest="${lib.dir}/spring-beans-${spring.version}.jar" skipexisting="true"/>
-        <get src="${maven.repo}/org/springframework/spring-core/${spring.version}/spring-core-${spring.version}.jar" dest="${lib.dir}/spring-core-${spring.version}.jar" skipexisting="true"/>
-        <get src="${maven.repo}/org/springframework/spring-expression/${spring.version}/spring-expression-${spring.version}.jar" dest="${lib.dir}/spring-expression-${spring.version}.jar" skipexisting="true"/>
-        <get src="${maven.repo}/org/springframework/spring-aop/${spring.version}/spring-aop-${spring.version}.jar" dest="${lib.dir}/spring-aop-${spring.version}.jar" skipexisting="true"/>
-        <get src="${maven.repo}/commons-logging/commons-logging/${commons.logging.version}/commons-logging-${commons.logging.version}.jar" dest="${lib.dir}/commons-logging-${commons.logging.version}.jar" skipexisting="true"/>
-        <get src="${maven.repo}/javax/servlet/javax.servlet-api/${servlet.api.version}/javax.servlet-api-${servlet.api.version}.jar" dest="${lib.dir}/javax.servlet-api-${servlet.api.version}.jar" skipexisting="true"/>
+    <target name="init">
+        <mkdir dir="${classes.dir}"/>
+        <mkdir dir="${stage.common.dir}"/>
+        <mkdir dir="${package.dir}"/>
+        <mkdir dir="${dist.dir}"/>
     </target>
 
-    <target name="compile" depends="bootstrap" description="Compile Java source">
+    <target name="validate-env">
+        <condition property="deploy.env.present">
+            <length string="${deploy.env}" when="greater" length="0"/>
+        </condition>
+        <fail unless="deploy.env.present" message="deploy.env is required. Example: -Ddeploy.env=staging"/>
+    </target>
+
+    <target name="validate-server">
+        <condition property="deploy.server.present">
+            <length string="${deploy.server}" when="greater" length="0"/>
+        </condition>
+        <fail unless="deploy.server.present" message="deploy.server is required. Use one of: web1, web2, batch"/>
+        <condition property="valid.server">
+            <or>
+                <equals arg1="${deploy.server}" arg2="web1"/>
+                <equals arg1="${deploy.server}" arg2="web2"/>
+                <equals arg1="${deploy.server}" arg2="batch"/>
+            </or>
+        </condition>
+        <fail unless="valid.server" message="Invalid deploy.server='${deploy.server}'. Use web1, web2, or batch."/>
+    </target>
+
+    <target name="compile" depends="init" description="Compile Java sources once">
         <javac srcdir="${src.dir}"
                destdir="${classes.dir}"
                source="${java.source}"
@@ -56,25 +96,73 @@
                classpathref="compile.classpath"/>
     </target>
 
-    <target name="prepare-webapp" depends="compile" description="Prepare web resources">
-        <copy todir="${web.build.dir}">
+    <target name="stage-common" depends="compile" description="Stage webapp and common resources once">
+        <copy todir="${stage.common.dir}">
             <fileset dir="${web.dir}"/>
         </copy>
-        <mkdir dir="${web.build.dir}/WEB-INF/classes"/>
-        <copy todir="${web.build.dir}/WEB-INF/classes">
+
+        <mkdir dir="${stage.common.dir}/WEB-INF/classes"/>
+        <mkdir dir="${stage.common.dir}/WEB-INF/lib"/>
+
+        <copy todir="${stage.common.dir}/WEB-INF/classes">
             <fileset dir="${classes.dir}"/>
         </copy>
-        <mkdir dir="${web.build.dir}/WEB-INF/lib"/>
-        <copy todir="${web.build.dir}/WEB-INF/lib">
-            <fileset dir="${lib.dir}" includes="*.jar" excludes="javax.servlet-api-*.jar"/>
+
+        <copy todir="${stage.common.dir}/WEB-INF/classes">
+            <fileset dir="${resources.dir}" erroronmissingdir="false">
+                <exclude name="servers/**"/>
+            </fileset>
+        </copy>
+
+        <copy todir="${stage.common.dir}/WEB-INF/lib" overwrite="false">
+            <fileset dir="${legacy.lib.dir}" includes="**/*.jar" erroronmissingdir="false"/>
         </copy>
     </target>
 
-    <target name="war" depends="clean,prepare-webapp" description="Build WAR artifact">
-        <war destfile="${dist.dir}/${app.name}.war" webxml="${web.dir}/WEB-INF/web.xml">
-            <fileset dir="${web.build.dir}" excludes="WEB-INF/web.xml"/>
-        </war>
+    <macrodef name="package-server-war">
+        <attribute name="server"/>
+        <sequential>
+            <available file="${resources.dir}/servers/${deploy.env}/config-@{server}.properties"
+                       property="config.exists.@{server}"/>
+            <fail unless="config.exists.@{server}"
+                  message="Missing config file: ${resources.dir}/servers/${deploy.env}/config-@{server}.properties"/>
+
+            <delete dir="${package.dir}/@{server}"/>
+            <mkdir dir="${package.dir}/@{server}"/>
+
+            <copy todir="${package.dir}/@{server}">
+                <fileset dir="${stage.common.dir}"/>
+            </copy>
+
+            <copy file="${resources.dir}/servers/${deploy.env}/config-@{server}.properties"
+                  tofile="${package.dir}/@{server}/WEB-INF/classes/config.properties"
+                  overwrite="true"/>
+
+            <war destfile="${dist.dir}/${app.name}-${deploy.env}-@{server}.war"
+                 webxml="${package.dir}/@{server}/WEB-INF/web.xml">
+                <fileset dir="${package.dir}/@{server}" excludes="WEB-INF/web.xml"/>
+            </war>
+        </sequential>
+    </macrodef>
+
+    <target name="war-web1" depends="validate-env,stage-common" description="Build WAR for web1">
+        <package-server-war server="web1"/>
     </target>
 
-    <target name="package" depends="war"/>
+    <target name="war-web2" depends="validate-env,stage-common" description="Build WAR for web2">
+        <package-server-war server="web2"/>
+    </target>
+
+    <target name="war-batch" depends="validate-env,stage-common" description="Build WAR for batch">
+        <package-server-war server="batch"/>
+    </target>
+
+    <target name="war" depends="validate-env,validate-server" description="Build one server-specific WAR">
+        <antcall target="war-${deploy.server}"/>
+    </target>
+
+    <target name="dist-all" depends="clean,validate-env,war-web1,war-web2,war-batch"
+            description="Build all server WAR files for one environment"/>
+
+    <target name="package" depends="dist-all"/>
 </project>
