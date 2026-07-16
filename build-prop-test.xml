@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project name="pilot-prop-test" default="show" basedir=".">
+    <description>Minimal Ant property passing test for command-line -D options.</description>
+
+    <property name="deploy.env" value=""/>
+    <property name="deploy_env" value=""/>
+    <property name="deploy.server" value=""/>
+    <property name="deploy_server" value=""/>
+
+    <target name="show">
+        <echo>ant.file=[${ant.file}]</echo>
+        <echo>basedir=[${basedir}]</echo>
+        <echo>deploy.env=[${deploy.env}]</echo>
+        <echo>deploy_env=[${deploy_env}]</echo>
+        <echo>deploy.server=[${deploy.server}]</echo>
+        <echo>deploy_server=[${deploy_server}]</echo>
+    </target>
+
+    <target name="init" depends="show"/>
+</project>
