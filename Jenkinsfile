@@ -14,6 +14,20 @@ pipeline {
         GIT_CREDENTIAL_ID = 'github-credentials'
         DEFAULT_DEPLOY_BRANCH = 'develop'
         DEPLOY_BRANCH = ''
+
+        // Jenkins Credentials에 등록한 Tomcat 서버 SSH private-key credential ID로 변경하세요.
+        TOMCAT_SSH_CREDENTIAL_ID = 'tomcat-server-ssh-key'
+        TOMCAT_SSH_HOST = 'tomcat.example.internal'
+        TOMCAT_SSH_USER = 'deploy'
+        TOMCAT_SSH_PORT = '22'
+
+        // 별도 health endpoint가 없을 때의 Tomcat connector 확인용 URL 예시입니다.
+        // 실제 애플리케이션 context root가 있다면 그 URL로 바꾸는 편이 더 좋습니다.
+        HEALTHCHECK_URL = 'http://127.0.0.1:8080/'
+        // 대형 WAR의 첫 기동 시간을 고려한 예시값입니다.
+        HEALTHCHECK_INITIAL_DELAY_SEC = '15'
+        HEALTHCHECK_RETRY_INTERVAL_SEC = '10'
+        HEALTHCHECK_TIMEOUT_SEC = '300'
     }
 
     stages {
@@ -139,6 +153,64 @@ pipeline {
                       echo "No dist/pilot.war found; replace this block with the real deployment command."
                     fi
                 '''
+            }
+        }
+
+        stage('Health check') {
+            steps {
+                script {
+                    sshagent(credentials: [env.TOMCAT_SSH_CREDENTIAL_ID]) {
+                        sh '''
+                            # curl은 Tomcat 서버 안에서 실행한다.
+                            # 따라서 127.0.0.1은 Jenkins agent가 아니라 Tomcat 서버 자신을 가리킨다.
+                            ssh -p "${TOMCAT_SSH_PORT}" \
+                                -o BatchMode=yes \
+                                -o ConnectTimeout=10 \
+                                -o StrictHostKeyChecking=yes \
+                                "${TOMCAT_SSH_USER}@${TOMCAT_SSH_HOST}" \
+                                "HEALTHCHECK_URL='${HEALTHCHECK_URL}' HEALTHCHECK_INITIAL_DELAY_SEC='${HEALTHCHECK_INITIAL_DELAY_SEC}' HEALTHCHECK_RETRY_INTERVAL_SEC='${HEALTHCHECK_RETRY_INTERVAL_SEC}' HEALTHCHECK_TIMEOUT_SEC='${HEALTHCHECK_TIMEOUT_SEC}' bash -s" <<'REMOTE'
+                            # 첫 기동은 WAR 확장, Spring 초기화, 캐시 준비 등으로 느릴 수 있으므로
+                            # 즉시 실패시키지 않고, 전체 제한 시간 안에서 재시도한다.
+                            set -u
+
+                            echo "Waiting ${HEALTHCHECK_INITIAL_DELAY_SEC}s before health check: ${HEALTHCHECK_URL}"
+                            sleep "${HEALTHCHECK_INITIAL_DELAY_SEC}"
+
+                            deadline=$(( $(date +%s) + HEALTHCHECK_TIMEOUT_SEC ))
+                            attempt=1
+
+                            while true; do
+                              http_code="$(curl --silent --show-error --output /tmp/healthcheck-response.txt \
+                                --write-out '%{http_code}' --connect-timeout 3 --max-time 10 \
+                                "${HEALTHCHECK_URL}" || true)"
+
+                              # 별도 health endpoint가 없을 때는 404/401/403도 Tomcat HTTP Connector가
+                              # 응답한 것으로 보고 기동 성공으로 처리한다. 앱 context URL을 쓰는 경우에는
+                              # 이 조건을 2xx 또는 3xx로 좁혀도 된다.
+                              case "${http_code}" in
+                                2*|3*|401|403|404)
+                                  echo "Health check passed on attempt ${attempt}: HTTP ${http_code} (${HEALTHCHECK_URL})"
+                                  cat /tmp/healthcheck-response.txt || true
+                                  exit 0
+                                  ;;
+                              esac
+
+                              now=$(date +%s)
+                              if [ "${now}" -ge "${deadline}" ]; then
+                                echo "Health check failed: no HTTP response from ${HEALTHCHECK_URL} within ${HEALTHCHECK_TIMEOUT_SEC}s."
+                                echo "Last HTTP code: ${http_code:-curl connection failure}"
+                                exit 1
+                              fi
+
+                              remaining=$(( deadline - now ))
+                              echo "Health check attempt ${attempt} failed (HTTP ${http_code:-000}); retrying in ${HEALTHCHECK_RETRY_INTERVAL_SEC}s (${remaining}s remaining)."
+                              attempt=$(( attempt + 1 ))
+                              sleep "${HEALTHCHECK_RETRY_INTERVAL_SEC}"
+                            done
+REMOTE
+                        '''
+                    }
+                }
             }
         }
     }
